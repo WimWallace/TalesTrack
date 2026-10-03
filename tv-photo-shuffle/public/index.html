@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>TV Photo Shuffle</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #eee; font-family: system-ui, sans-serif; overflow: hidden; }
+  #start { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 16px; box-sizing: border-box; }
+  #start h1 { margin: 0; font-weight: 600; font-size: 24px; }
+  #start input { width: 100%; max-width: 520px; padding: 12px; font-size: 16px; border-radius: 8px; border: 1px solid #444; background: #111; color: #eee; box-sizing: border-box; }
+  button { padding: 14px 28px; font-size: 18px; border-radius: 10px; border: 0; background: #2d6cdf; color: #fff; cursor: pointer; }
+  button.secondary { background: #333; }
+  #msg { min-height: 1.4em; color: #aaa; text-align: center; max-width: 520px; }
+
+  #show { position: fixed; inset: 0; display: none; cursor: none; }
+  #show img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; opacity: 0; transition: opacity 0.8s ease; }
+  #show img.on { opacity: 1; }
+  #controls { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; gap: 20px; background: rgba(0,0,0,0.45); cursor: default; }
+  #controls.on { display: flex; }
+  #status { position: absolute; bottom: 16px; left: 0; right: 0; text-align: center; color: #ccc; font-size: 14px; }
+  #loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #888; }
+</style>
+</head>
+<body>
+
+<div id="start">
+  <h1>TV Photo Shuffle</h1>
+  <input id="url" type="url" inputmode="url" autocomplete="off" placeholder="Link naar gedeeld Google Foto's-album">
+  <button id="go">Start</button>
+  <div id="msg"></div>
+</div>
+
+<div id="show">
+  <img id="a" alt="" referrerpolicy="no-referrer">
+  <img id="b" alt="" referrerpolicy="no-referrer">
+  <div id="loading">Album laden…</div>
+  <div id="controls">
+    <button id="pause">Pauze</button>
+    <button id="resume">Hervat</button>
+    <button id="exit" class="secondary">Stop</button>
+    <div id="status"></div>
+  </div>
+</div>
+
+<script>
+const DEFAULT_ALBUM = 'https://photos.app.goo.gl/nnNufxC1nMz7krmn7';
+const INTERVAL_MS = 7000;
+const $ = (id) => document.getElementById(id);
+
+let run = null; // state of the current slideshow; replaced on every start
+
+try { $('url').value = localStorage.getItem('album') || DEFAULT_ALBUM; } catch { $('url').value = DEFAULT_ALBUM; }
+
+function randInt(n) { // uniform 0..n-1
+  const buf = new Uint32Array(1);
+  const limit = Math.floor(0x100000000 / n) * n;
+  do crypto.getRandomValues(buf); while (buf[0] >= limit);
+  return buf[0] % n;
+}
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) { const j = randInt(i + 1); [arr[i], arr[j]] = [arr[j], arr[i]]; }
+  return arr;
+}
+
+// Request size: big enough for the screen (or a 4K TV when opened in the TV browser), never upscaled by Google.
+const box = Math.min(3840, Math.round(Math.max(screen.width, screen.height) * (window.devicePixelRatio || 1)));
+const sized = (u) => u.replace(/=[^/]*$/, '') + `=w${box}-h${box}`;
+
+$('go').addEventListener('click', start);
+
+async function start() {
+  const url = $('url').value.trim();
+  if (!url) return;
+  try { localStorage.setItem('album', url); } catch {}
+
+  // These need the tap that started the slideshow.
+  try { await document.documentElement.requestFullscreen({ navigationUI: 'hide' }); } catch {}
+  try { await screen.orientation.lock('landscape'); } catch {}
+
+  run = { all: [], seen: new Set(), queue: [], pos: 0, timer: null, paused: false, loading: true, front: $('a'), back: $('b'), hideTimer: null };
+  $('start').style.display = 'none';
+  $('show').style.display = 'block';
+  $('loading').style.display = 'flex';
+  $('loading').textContent = 'Album laden…';
+  $('a').classList.remove('on'); $('b').classList.remove('on');
+  hideControls();
+  keepAwake();
+  load(run, url);
+}
+
+// Pages arrive while the slideshow is already running. Each new photo is put at a
+// random position in the part of the queue that has not been shown yet, so the
+// final order is a uniform shuffle of the whole album without waiting for all pages.
+function addItems(r, items) {
+  for (const it of items) {
+    if (r.seen.has(it.u)) continue;
+    r.seen.add(it.u);
+    r.all.push(it);
+    const from = Math.min(r.pos, r.queue.length);
+    r.queue.splice(from + randInt(r.queue.length - from + 1), 0, it);
+  }
+}
+
+async function api(params) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const res = await fetch('/api/album?' + new URLSearchParams(params));
+      const body = await res.json();
+      if (!res.ok || body.error) throw new Error(body.error || 'HTTP ' + res.status);
+      return body;
+    } catch (e) {
+      if (attempt >= 2) throw e;
+      await new Promise((ok) => setTimeout(ok, 1500 * (attempt + 1)));
+    }
+  }
+}
+
+async function load(r, url) {
+  try {
+    let page = await api({ url });
+    const { id, key } = page;
+    addItems(r, page.items);
+    if (r === run) next(r);
+    while (page.token && r === run) {
+      page = await api({ id, key, token: page.token });
+      addItems(r, page.items);
+      updateStatus();
+    }
+  } catch (e) {
+    if (r !== run) return;
+    if (!r.all.length) { stop(); $('msg').textContent = 'Kon album niet laden: ' + e.message; return; }
+    r.error = e.message; // keep showing what we have
+  }
+  r.loading = false;
+  updateStatus();
+}
+
+function next(r) {
+  if (r !== run || r.paused) return;
+  clearTimeout(r.timer);
+  if (r.pos >= r.queue.length) { // whole album shown: new random order
+    const last = r.queue[r.queue.length - 1];
+    r.queue = shuffle(r.all.slice());
+    if (r.queue.length > 1 && r.queue[0] === last) r.queue.push(r.queue.shift());
+    r.pos = 0;
+  }
+  const item = r.queue[r.pos++];
+  const img = new Image();
+  img.referrerPolicy = 'no-referrer';
+  img.onload = () => {
+    if (r !== run) return;
+    r.back.src = img.src;
+    r.back.classList.add('on');
+    r.front.classList.remove('on');
+    [r.front, r.back] = [r.back, r.front];
+    $('loading').style.display = 'none';
+    updateStatus();
+    r.timer = setTimeout(() => next(r), INTERVAL_MS);
+  };
+  img.onerror = () => { if (r === run) r.timer = setTimeout(() => next(r), 300); };
+  img.src = sized(item.u);
+}
+
+function updateStatus() {
+  const r = run;
+  if (!r) return;
+  let s = `Foto ${Math.min(r.pos, r.queue.length)} van ${r.all.length}`;
+  if (r.loading) s += ' (album wordt nog geladen…)';
+  if (r.error) s += ` — laden gestopt: ${r.error}`;
+  if (r.paused) s += ' — gepauzeerd';
+  $('status').textContent = s;
+  $('pause').style.display = r.paused ? 'none' : '';
+  $('resume').style.display = r.paused ? '' : 'none';
+}
+
+function showControls() {
+  updateStatus();
+  $('controls').classList.add('on');
+  clearTimeout(run.hideTimer);
+  run.hideTimer = setTimeout(hideControls, 5000);
+}
+function hideControls() { $('controls').classList.remove('on'); }
+
+$('show').addEventListener('click', (e) => {
+  if (!run) return;
+  if (e.target.tagName === 'BUTTON') return;
+  $('controls').classList.contains('on') ? hideControls() : showControls();
+});
+$('pause').addEventListener('click', () => { run.paused = true; clearTimeout(run.timer); showControls(); });
+$('resume').addEventListener('click', () => { run.paused = false; hideControls(); next(run); });
+$('exit').addEventListener('click', () => { stop(); try { document.exitFullscreen(); } catch {} });
+
+function stop() {
+  if (run) { clearTimeout(run.timer); clearTimeout(run.hideTimer); }
+  run = null;
+  releaseAwake();
+  $('show').style.display = 'none';
+  $('start').style.display = 'flex';
+  $('msg').textContent = '';
+}
+
+// Keep the screen on while the slideshow runs (the lock is dropped when the tab is hidden, so re-acquire it).
+let wakeLock = null;
+async function keepAwake() {
+  try { if (run && 'wakeLock' in navigator && document.visibilityState === 'visible') wakeLock = await navigator.wakeLock.request('screen'); } catch {}
+}
+function releaseAwake() { try { wakeLock && wakeLock.release(); } catch {} wakeLock = null; }
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && run) keepAwake(); });
+</script>
+</body>
+</html>
