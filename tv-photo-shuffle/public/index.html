@@ -11,18 +11,24 @@
   html, body { margin: 0; height: 100%; background: #000; color: #eee; font-family: system-ui, sans-serif; overflow: hidden; }
   #start { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 16px; box-sizing: border-box; }
   #start h1 { margin: 0; font-weight: 600; font-size: 24px; }
-  #start input { width: 100%; max-width: 520px; padding: 12px; font-size: 16px; border-radius: 8px; border: 1px solid #444; background: #111; color: #eee; box-sizing: border-box; }
-  button { padding: 14px 28px; font-size: 18px; border-radius: 10px; border: 0; background: #2d6cdf; color: #fff; cursor: pointer; }
+  #start input, #start select { width: 100%; max-width: 520px; padding: 12px; font-size: 16px; border-radius: 8px; border: 1px solid #444; background: #111; color: #eee; box-sizing: border-box; }
+  #start label { display: flex; align-items: center; gap: 12px; font-size: 16px; }
+  #start label select { width: auto; }
+  button { padding: 14px 24px; font-size: 18px; border-radius: 10px; border: 0; background: #2d6cdf; color: #fff; cursor: pointer; }
   button.secondary { background: #333; }
+  button:focus { outline: 3px solid #fff; }
   #msg { min-height: 1.4em; color: #aaa; text-align: center; max-width: 520px; }
 
   #show { position: fixed; inset: 0; display: none; cursor: none; }
-  #show img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; opacity: 0; transition: opacity 0.8s ease; }
+  #show img { position: absolute; left: 0; top: 0; width: 100%; height: 100%; object-fit: contain; opacity: 0; transition: opacity 0.8s ease; }
   #show img.on { opacity: 1; }
-  #controls { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; gap: 20px; background: rgba(0,0,0,0.45); cursor: default; }
+  #controls { position: absolute; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 24px; background: rgba(0,0,0,0.5); cursor: default; }
   #controls.on { display: flex; }
-  #status { position: absolute; bottom: 16px; left: 0; right: 0; text-align: center; color: #ccc; font-size: 14px; }
-  #loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #888; }
+  .row { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 16px; }
+  #speed { font-size: 18px; min-width: 9em; text-align: center; }
+  #status { color: #ccc; font-size: 14px; text-align: center; padding: 0 16px; }
+  #loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #888; text-align: center; padding: 16px; }
+  #pausedTag { position: absolute; top: 16px; right: 16px; padding: 6px 12px; border-radius: 6px; background: rgba(0,0,0,0.6); color: #ddd; font-size: 14px; display: none; }
 </style>
 </head>
 <body>
@@ -30,6 +36,7 @@
 <div id="start">
   <h1>TV Photo Shuffle</h1>
   <input id="url" type="url" inputmode="url" autocomplete="off" placeholder="Link naar gedeeld Google Foto's-album">
+  <label>Tijd per foto <select id="secs"></select></label>
   <button id="go">Start</button>
   <div id="msg"></div>
 </div>
@@ -38,22 +45,52 @@
   <img id="a" alt="" referrerpolicy="no-referrer">
   <img id="b" alt="" referrerpolicy="no-referrer">
   <div id="loading">Album laden…</div>
+  <div id="pausedTag">Gepauzeerd</div>
   <div id="controls">
-    <button id="pause">Pauze</button>
-    <button id="resume">Hervat</button>
-    <button id="exit" class="secondary">Stop</button>
+    <div class="row">
+      <button id="prev" class="secondary">◀ Vorige</button>
+      <button id="pause">Pauze</button>
+      <button id="resume">Hervat</button>
+      <button id="nextBtn" class="secondary">Volgende ▶</button>
+    </div>
+    <div class="row">
+      <button id="less" class="secondary">−</button>
+      <div id="speed"></div>
+      <button id="more" class="secondary">+</button>
+    </div>
+    <div class="row"><button id="exit" class="secondary">Stoppen</button></div>
     <div id="status"></div>
   </div>
 </div>
 
 <script>
 const DEFAULT_ALBUM = 'https://photos.app.goo.gl/nnNufxC1nMz7krmn7';
-const INTERVAL_MS = 7000;
+const STEPS = [3, 4, 5, 6, 7, 8, 10, 12, 15, 20, 30, 60];
 const $ = (id) => document.getElementById(id);
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); return true; } catch { return false; } },
+};
 
 let run = null; // state of the current slideshow; replaced on every start
+let secs = +store.get('secs') || 5;
+if (!STEPS.includes(secs)) secs = 5;
 
-try { $('url').value = localStorage.getItem('album') || DEFAULT_ALBUM; } catch { $('url').value = DEFAULT_ALBUM; }
+$('url').value = store.get('album') || DEFAULT_ALBUM;
+for (const s of STEPS) $('secs').add(new Option(s + ' seconden', s, false, s === secs));
+$('secs').addEventListener('change', () => setSecs(+$('secs').value));
+
+function setSecs(s) {
+  secs = s;
+  store.set('secs', s);
+  $('secs').value = s;
+  $('speed').textContent = `${s} seconden per foto`;
+  if (run && !run.paused && run.shownAt) { // apply right away, counted from when the current photo appeared
+    clearTimeout(run.timer);
+    run.timer = setTimeout(() => next(run), Math.max(0, run.shownAt + s * 1000 - Date.now()));
+  }
+}
+function stepSecs(d) { setSecs(STEPS[Math.max(0, Math.min(STEPS.length - 1, STEPS.indexOf(secs) + d))]); showControls(); }
 
 function randInt(n) { // uniform 0..n-1
   const buf = new Uint32Array(1);
@@ -66,35 +103,60 @@ function shuffle(arr) {
   return arr;
 }
 
-// Request size: big enough for the screen (or a 4K TV when opened in the TV browser), never upscaled by Google.
+// Request size: big enough for the screen (or a 4K TV), never upscaled by Google.
 const box = Math.min(3840, Math.round(Math.max(screen.width, screen.height) * (window.devicePixelRatio || 1)));
 const sized = (u) => u.replace(/=[^/]*$/, '') + `=w${box}-h${box}`;
 
-$('go').addEventListener('click', start);
+// ---- Rotation ----------------------------------------------------------------
+// Browsers that ignore the EXIF orientation tag (many TV browsers) show portrait
+// photos on their side. There we ask /api/orient for the tag and rotate ourselves.
+const forceOrient = /[?&]orient=1/.test(location.search);
+const nativeExif = !forceOrient && window.CSS && CSS.supports && CSS.supports('image-orientation', 'from-image');
+const orientCache = new Map();
+function orientation(url) {
+  if (nativeExif) return Promise.resolve(null);
+  if (!orientCache.has(url)) {
+    orientCache.set(url, fetch('/api/orient?u=' + encodeURIComponent(url)).then((r) => r.json()).catch(() => null));
+  }
+  return orientCache.get(url);
+}
+const TRANSFORMS = { 2: 'scaleX(-1)', 3: 'rotate(180deg)', 4: 'scaleY(-1)', 5: 'rotate(90deg) scaleY(-1)', 6: 'rotate(90deg)', 7: 'rotate(90deg) scaleX(-1)', 8: 'rotate(270deg)' };
+function rotationFor(info, img) {
+  if (!info || !TRANSFORMS[info.o]) return 0;
+  if (info.o >= 5 && info.w && info.h && img.naturalWidth !== img.naturalHeight) {
+    // Only rotate if the browser really shows the stored (unrotated) pixels.
+    if ((img.naturalWidth > img.naturalHeight) !== (info.w > info.h)) return 0;
+  }
+  return info.o;
+}
+function place(el) {
+  const o = +el.dataset.o || 0;
+  const W = innerWidth, H = innerHeight, s = el.style;
+  if (o >= 5) { // rotated by 90°: lay out in a box with swapped sides, then turn it
+    s.width = H + 'px'; s.height = W + 'px';
+    s.left = (W - H) / 2 + 'px'; s.top = (H - W) / 2 + 'px';
+  } else {
+    s.width = s.height = '100%'; s.left = s.top = '0';
+  }
+  s.transform = TRANSFORMS[o] || '';
+}
+addEventListener('resize', () => { place($('a')); place($('b')); });
 
-async function start() {
-  const url = $('url').value.trim();
-  if (!url) return;
-  try { localStorage.setItem('album', url); } catch {}
-
-  // These need the tap that started the slideshow.
-  try { await document.documentElement.requestFullscreen({ navigationUI: 'hide' }); } catch {}
-  try { await screen.orientation.lock('landscape'); } catch {}
-
-  run = { all: [], seen: new Set(), queue: [], pos: 0, timer: null, paused: false, loading: true, front: $('a'), back: $('b'), hideTimer: null };
-  $('start').style.display = 'none';
-  $('show').style.display = 'block';
-  $('loading').style.display = 'flex';
-  $('loading').textContent = 'Album laden…';
-  $('a').classList.remove('on'); $('b').classList.remove('on');
-  hideControls();
-  keepAwake();
-  load(run, url);
+// ---- Album list --------------------------------------------------------------
+// The full list is remembered, so the next start can shuffle the whole album at
+// once; the list is refreshed in the background on every start.
+function readCache(url) {
+  try {
+    const c = JSON.parse(store.get('albumCache') || 'null');
+    return c && c.url === url && Array.isArray(c.items) ? c.items.map(([u, w, h]) => ({ u, w, h })) : null;
+  } catch { return null; }
+}
+function writeCache(url, items) {
+  store.set('albumCache', JSON.stringify({ url, items: items.map((it) => [it.u, it.w, it.h]) }));
 }
 
-// Pages arrive while the slideshow is already running. Each new photo is put at a
-// random position in the part of the queue that has not been shown yet, so the
-// final order is a uniform shuffle of the whole album without waiting for all pages.
+// New photos go to a random position in the part of the queue not shown yet,
+// which keeps the order a uniform shuffle of the whole album.
 function addItems(r, items) {
   for (const it of items) {
     if (r.seen.has(it.u)) continue;
@@ -103,6 +165,12 @@ function addItems(r, items) {
     const from = Math.min(r.pos, r.queue.length);
     r.queue.splice(from + randInt(r.queue.length - from + 1), 0, it);
   }
+}
+function removeMissing(r, fresh) {
+  const keep = new Set(fresh.map((it) => it.u));
+  r.all = r.all.filter((it) => keep.has(it.u));
+  r.queue = r.queue.slice(0, r.pos).concat(r.queue.slice(r.pos).filter((it) => keep.has(it.u)));
+  for (const u of [...r.seen]) if (!keep.has(u)) r.seen.delete(u);
 }
 
 async function api(params) {
@@ -120,27 +188,61 @@ async function api(params) {
 }
 
 async function load(r, url) {
+  const cached = readCache(url);
+  if (cached && cached.length) { addItems(r, cached); r.fromCache = true; next(r); }
+
+  const fresh = [];
   try {
     let page = await api({ url });
     const { id, key } = page;
-    addItems(r, page.items);
-    if (r === run) next(r);
+    fresh.push(...page.items);
     while (page.token && r === run) {
+      if (!r.started) $('loading').textContent = `Album laden… ${fresh.length} foto's`;
       page = await api({ id, key, token: page.token });
-      addItems(r, page.items);
-      updateStatus();
+      fresh.push(...page.items);
     }
   } catch (e) {
-    if (r !== run) return;
-    if (!r.all.length) { stop(); $('msg').textContent = 'Kon album niet laden: ' + e.message; return; }
-    r.error = e.message; // keep showing what we have
+    r.error = e.message;
   }
+  if (r !== run) return;
+
+  if (!r.error && fresh.length) { writeCache(url, fresh); if (r.fromCache) removeMissing(r, fresh); }
+  addItems(r, fresh);
   r.loading = false;
+  if (!r.all.length) { stop(); $('msg').textContent = 'Kon album niet laden: ' + (r.error || 'geen foto\'s gevonden'); return; }
+  if (!r.started) next(r);
   updateStatus();
 }
 
+// ---- Slideshow ---------------------------------------------------------------
+$('go').addEventListener('click', start);
+
+async function start() {
+  const url = $('url').value.trim();
+  if (!url) return;
+  store.set('album', url);
+
+  // These need the click that started the slideshow.
+  try { await document.documentElement.requestFullscreen({ navigationUI: 'hide' }); } catch {}
+  try { await screen.orientation.lock('landscape'); } catch {}
+
+  run = { all: [], seen: new Set(), queue: [], pos: 0, timer: null, paused: false, loading: true, started: false, front: $('a'), back: $('b'), hideTimer: null, seq: 0 };
+  $('start').style.display = 'none';
+  $('show').style.display = 'block';
+  $('loading').style.display = 'flex';
+  $('loading').textContent = 'Album laden…';
+  $('pausedTag').style.display = 'none';
+  $('a').classList.remove('on'); $('b').classList.remove('on');
+  hideControls();
+  setSecs(secs);
+  keepAwake();
+  load(run, url);
+}
+
+// Show queue[pos] and advance. Also used for the manual Previous/Next buttons.
 function next(r) {
-  if (r !== run || r.paused) return;
+  if (r !== run || !r.queue.length) return;
+  r.started = true;
   clearTimeout(r.timer);
   if (r.pos >= r.queue.length) { // whole album shown: new random order
     const last = r.queue[r.queue.length - 1];
@@ -149,50 +251,94 @@ function next(r) {
     r.pos = 0;
   }
   const item = r.queue[r.pos++];
+  const seq = ++r.seq;
+  const src = sized(item.u);
   const img = new Image();
   img.referrerPolicy = 'no-referrer';
-  img.onload = () => {
-    if (r !== run) return;
-    r.back.src = img.src;
-    r.back.classList.add('on');
+  const loaded = new Promise((ok, fail) => { img.onload = ok; img.onerror = fail; });
+  img.src = src;
+  Promise.all([loaded, orientation(src)]).then(([, info]) => {
+    if (r !== run || seq !== r.seq) return;
+    const el = r.back;
+    el.dataset.o = rotationFor(info, img);
+    place(el);
+    el.src = src;
+    el.classList.add('on');
     r.front.classList.remove('on');
     [r.front, r.back] = [r.back, r.front];
     $('loading').style.display = 'none';
+    r.shownAt = Date.now();
     updateStatus();
-    r.timer = setTimeout(() => next(r), INTERVAL_MS);
-  };
-  img.onerror = () => { if (r === run) r.timer = setTimeout(() => next(r), 300); };
-  img.src = sized(item.u);
+    if (!r.paused) r.timer = setTimeout(() => next(r), secs * 1000);
+  }, () => {
+    if (r === run && seq === r.seq) r.timer = setTimeout(() => next(r), 300); // broken photo: skip
+  });
+}
+function prev(r) {
+  if (!r || r.pos < 2) return;
+  r.pos -= 2;
+  next(r);
+}
+
+function setPaused(p) {
+  if (!run) return;
+  run.paused = p;
+  clearTimeout(run.timer);
+  $('pausedTag').style.display = p ? 'block' : 'none';
+  if (p) showControls();
+  else { hideControls(); run.shownAt = Date.now(); run.timer = setTimeout(() => next(run), secs * 1000); }
 }
 
 function updateStatus() {
   const r = run;
   if (!r) return;
   let s = `Foto ${Math.min(r.pos, r.queue.length)} van ${r.all.length}`;
-  if (r.loading) s += ' (album wordt nog geladen…)';
-  if (r.error) s += ` — laden gestopt: ${r.error}`;
-  if (r.paused) s += ' — gepauzeerd';
+  if (r.loading) s += ' (album wordt bijgewerkt…)';
+  if (r.error) s += ` — laden mislukt: ${r.error}`;
   $('status').textContent = s;
   $('pause').style.display = r.paused ? 'none' : '';
   $('resume').style.display = r.paused ? '' : 'none';
 }
 
+// While paused the controls stay on screen; while playing they hide after 6 s.
 function showControls() {
+  if (!run) return;
   updateStatus();
   $('controls').classList.add('on');
   clearTimeout(run.hideTimer);
-  run.hideTimer = setTimeout(hideControls, 5000);
+  if (!run.paused) run.hideTimer = setTimeout(hideControls, 6000);
+  const focus = run.paused ? $('resume') : $('pause');
+  if (!$('controls').contains(document.activeElement) || getComputedStyle(document.activeElement).display === 'none') focus.focus();
 }
-function hideControls() { $('controls').classList.remove('on'); }
+function hideControls() { $('controls').classList.remove('on'); if (document.activeElement) document.activeElement.blur(); }
 
 $('show').addEventListener('click', (e) => {
-  if (!run) return;
-  if (e.target.tagName === 'BUTTON') return;
-  $('controls').classList.contains('on') ? hideControls() : showControls();
+  if (!run || e.target.tagName === 'BUTTON') return;
+  if ($('controls').classList.contains('on') && !run.paused) hideControls();
+  else showControls();
 });
-$('pause').addEventListener('click', () => { run.paused = true; clearTimeout(run.timer); showControls(); });
-$('resume').addEventListener('click', () => { run.paused = false; hideControls(); next(run); });
+$('pause').addEventListener('click', () => setPaused(true));
+$('resume').addEventListener('click', () => setPaused(false));
+$('prev').addEventListener('click', () => { prev(run); showControls(); });
+$('nextBtn').addEventListener('click', () => { next(run); showControls(); });
+$('less').addEventListener('click', () => stepSecs(-1));
+$('more').addEventListener('click', () => stepSecs(1));
 $('exit').addEventListener('click', () => { stop(); try { document.exitFullscreen(); } catch {} });
+
+// Remote control / keyboard: OK shows the controls, play/pause keys, left/right to browse.
+document.addEventListener('keydown', (e) => {
+  if (!run) return;
+  const k = e.key, open = $('controls').classList.contains('on');
+  if (k === 'MediaPlayPause' || k === ' ' || e.keyCode === 10252) { setPaused(!run.paused); e.preventDefault(); }
+  else if (k === 'MediaPause' || e.keyCode === 19) setPaused(true);
+  else if (k === 'MediaPlay' || e.keyCode === 415) setPaused(false);
+  else if (k === 'MediaStop' || e.keyCode === 413) $('exit').click();
+  else if (!open && (k === 'ArrowRight' || k === 'MediaTrackNext')) { next(run); e.preventDefault(); }
+  else if (!open && (k === 'ArrowLeft' || k === 'MediaTrackPrevious')) { prev(run); e.preventDefault(); }
+  else if (!open && (k === 'Enter' || k === 'ArrowUp' || k === 'ArrowDown')) { showControls(); e.preventDefault(); }
+  else if (open && (k === 'Escape' || k === 'Backspace' || e.keyCode === 10009) && !run.paused) { hideControls(); e.preventDefault(); }
+  else if (open) { clearTimeout(run.hideTimer); if (!run.paused) run.hideTimer = setTimeout(hideControls, 6000); }
+});
 
 function stop() {
   if (run) { clearTimeout(run.timer); clearTimeout(run.hideTimer); }
